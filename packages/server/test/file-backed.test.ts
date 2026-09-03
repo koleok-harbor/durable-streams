@@ -148,7 +148,7 @@ describe(`Recovery and Crash Consistency`, () => {
 
     // Should be able to append more
     await server2.store.append(`/test`, encode(`msg2`))
-    const { messages } = server2.store.read(`/test`)
+    const { messages } = await server2.store.read(`/test`)
     expect(messages).toHaveLength(2)
 
     await server2.stop()
@@ -188,7 +188,7 @@ describe(`Recovery and Crash Consistency`, () => {
     const server2 = new DurableStreamTestServer({ dataDir, port: 0 })
     await server2.start()
 
-    const { messages } = server2.store.read(`/test`)
+    const { messages } = await server2.store.read(`/test`)
     // Should only have 1 complete message (complete1)
     // complete2 was truncated so should be discarded
     expect(messages).toHaveLength(1)
@@ -227,7 +227,7 @@ describe(`Recovery and Crash Consistency`, () => {
     const server2 = new DurableStreamTestServer({ dataDir, port: 0 })
     await server2.start()
 
-    expect(server2.store.has(`/test`)).toBe(false)
+    expect(await server2.store.has(`/test`)).toBe(false)
 
     await server2.stop()
   })
@@ -269,7 +269,7 @@ describe(`Recovery and Crash Consistency`, () => {
     )
 
     // read() should return no messages
-    const { messages } = server2.store.read(`/test`)
+    const { messages } = await server2.store.read(`/test`)
     expect(messages).toHaveLength(0)
 
     await server2.stop()
@@ -292,8 +292,8 @@ describe(`Recovery and Crash Consistency`, () => {
     const server2 = new DurableStreamTestServer({ dataDir, port: 0 })
     await server2.start()
 
-    expect(server2.store.has(`/test`)).toBe(true)
-    const { messages } = server2.store.read(`/test`)
+    expect(await server2.store.has(`/test`)).toBe(true)
+    const { messages } = await server2.store.read(`/test`)
     expect(messages).toHaveLength(0)
 
     await server2.stop()
@@ -317,8 +317,8 @@ describe(`Recovery and Crash Consistency`, () => {
     const server2 = new DurableStreamTestServer({ dataDir, port: 0 })
     await server2.start()
 
-    expect(server2.store.has(`/persist`)).toBe(true)
-    const { messages } = server2.store.read(`/persist`)
+    expect(await server2.store.has(`/persist`)).toBe(true)
+    const { messages } = await server2.store.read(`/persist`)
     expect(messages).toHaveLength(1)
     expect(decode(messages[0]!.data)).toBe(`persisted message`)
 
@@ -349,7 +349,7 @@ describe(`Recovery and Crash Consistency`, () => {
       syncBuiltinESMExports()
     }
 
-    expect(server.store.has(`/fork`)).toBe(false)
+    expect(await server.store.has(`/fork`)).toBe(false)
 
     const sourceMeta = (server.store as any).db.get(`stream:/source`)
     expect(sourceMeta.refCount ?? 0).toBe(0)
@@ -390,7 +390,7 @@ describe(`Fork graph consistency`, () => {
       }),
     ])
     expect((server.store as any).db.get(`stream:/parent`).refCount).toBe(1)
-    expect(server.store.has(`/child`)).toBe(true)
+    expect(await server.store.has(`/child`)).toBe(true)
   })
 
   test(`fork file-open failure rolls back child, file, and parent edge`, async () => {
@@ -469,11 +469,11 @@ describe(`Fork graph consistency`, () => {
   test(`a read cannot splice data from a deleted stream generation`, async () => {
     await server.store.create(`/same`, { contentType: `text/plain` })
     await server.store.append(`/same`, encode(`old`))
-    const oldOffset = server.store.get(`/same`)!.currentOffset
-    server.store.delete(`/same`)
+    const oldOffset = (await server.store.get(`/same`))!.currentOffset
+    await server.store.delete(`/same`)
     await server.store.create(`/same`, { contentType: `text/plain` })
     await server.store.append(`/same`, encode(`new`))
-    const result = server.store.read(`/same`, oldOffset)
+    const result = await server.store.read(`/same`, oldOffset)
     expect(
       result.messages.map((message) => decode(message.data))
     ).not.toContain(`old`)
@@ -512,7 +512,7 @@ describe(`Concurrent appends`, () => {
     expect(new Set(offsets).size).toBe(N)
 
     // The file must contain N messages — read() walks the file directly.
-    const { messages } = server.store.read(`/concurrent`)
+    const { messages } = await server.store.read(`/concurrent`)
     expect(messages).toHaveLength(N)
 
     // The LMDB-tracked currentOffset must equal the offset of the last
