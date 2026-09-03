@@ -26,6 +26,7 @@ import {
 } from "@durable-streams/client"
 import { StreamStore } from "./store"
 import { FileBackedStreamStore } from "./file-store"
+import { PostgresStreamStore } from "./postgres-store"
 import { generateResponseCursor } from "./cursor"
 import { SubscriptionManager } from "./subscription-manager"
 import { SubscriptionRoutes } from "./subscription-routes"
@@ -149,12 +150,13 @@ interface InjectedFault {
 }
 
 export class DurableStreamTestServer {
-  readonly store: StreamStore | FileBackedStreamStore
+  readonly store: StreamStore | FileBackedStreamStore | PostgresStreamStore
   private server: Server | null = null
   private options: Required<
     Omit<
       TestServerOptions,
       | `dataDir`
+      | `postgresUrl`
       | `onStreamCreated`
       | `onStreamDeleted`
       | `compression`
@@ -164,6 +166,7 @@ export class DurableStreamTestServer {
     >
   > & {
     dataDir?: string
+    postgresUrl?: string
     onStreamCreated?: (event: StreamLifecycleEvent) => void | Promise<void>
     onStreamDeleted?: (event: StreamLifecycleEvent) => void | Promise<void>
     compression: boolean
@@ -179,8 +182,12 @@ export class DurableStreamTestServer {
   private subscriptionRoutes: SubscriptionRoutes | null = null
 
   constructor(options: TestServerOptions = {}) {
-    // Choose store based on dataDir option
-    if (options.dataDir) {
+    // Choose store based on options: postgresUrl > dataDir > in-memory
+    if (options.postgresUrl) {
+      this.store = new PostgresStreamStore({
+        connectionString: options.postgresUrl,
+      })
+    } else if (options.dataDir) {
       this.store = new FileBackedStreamStore({
         dataDir: options.dataDir,
       })
@@ -193,6 +200,7 @@ export class DurableStreamTestServer {
       host: options.host ?? `127.0.0.1`,
       longPollTimeout: options.longPollTimeout ?? 30_000,
       dataDir: options.dataDir,
+      postgresUrl: options.postgresUrl,
       onStreamCreated: options.onStreamCreated,
       onStreamDeleted: options.onStreamDeleted,
       compression: options.compression ?? true,
@@ -210,6 +218,11 @@ export class DurableStreamTestServer {
   async start(): Promise<string> {
     if (this.server) {
       throw new Error(`Server already started`)
+    }
+
+    // Ensure the Postgres schema exists before serving.
+    if (this.store instanceof PostgresStreamStore) {
+      await this.store.init()
     }
 
     return new Promise((resolve, reject) => {
@@ -282,8 +295,11 @@ export class DurableStreamTestServer {
         }
 
         try {
-          // Close file-backed store if used
-          if (this.store instanceof FileBackedStreamStore) {
+          // Close file-backed or postgres store if used
+          if (
+            this.store instanceof FileBackedStreamStore ||
+            this.store instanceof PostgresStreamStore
+          ) {
             await this.store.close()
           }
 
@@ -311,8 +327,8 @@ export class DurableStreamTestServer {
   /**
    * Clear all streams.
    */
-  clear(): void {
-    this.store.clear()
+  async clear(): Promise<void> {
+    await this.store.clear()
   }
 
   /**
@@ -527,7 +543,7 @@ export class DurableStreamTestServer {
           await this.handleCreate(path, req, res)
           break
         case `HEAD`:
-          this.handleHead(path, res)
+          await this.handleHead(path, res)
           break
         case `GET`:
           await this.handleRead(path, url, req, res)
@@ -698,22 +714,20 @@ export class DurableStreamTestServer {
     // Read body if present
     const body = await this.readBody(req)
 
-    const isNew = !this.store.has(path)
+    const isNew = !(await this.store.has(path))
 
     // Support both sync (StreamStore) and async (FileBackedStreamStore) create
     try {
-      await Promise.resolve(
-        this.store.create(path, {
-          contentType,
-          ttlSeconds,
-          expiresAt: expiresAtHeader,
-          initialData: body.length > 0 ? body : undefined,
-          closed: createClosed,
-          forkedFrom: forkedFromHeader,
-          forkOffset: forkOffsetHeader,
-          forkSubOffset,
-        })
-      )
+      await this.store.create(path, {
+        contentType,
+        ttlSeconds,
+        expiresAt: expiresAtHeader,
+        initialData: body.length > 0 ? body : undefined,
+        closed: createClosed,
+        forkedFrom: forkedFromHeader,
+        forkOffset: forkOffsetHeader,
+        forkSubOffset,
+      })
     } catch (err) {
       if (err instanceof Error) {
         if (err.message.includes(`Source stream not found`)) {
@@ -745,7 +759,7 @@ export class DurableStreamTestServer {
       throw err
     }
 
-    const stream = this.store.get(path)!
+    const stream = (await this.store.get(path))!
     const resolvedContentType =
       stream.contentType ?? contentType ?? `application/octet-stream`
 
@@ -788,8 +802,8 @@ export class DurableStreamTestServer {
   /**
    * Handle HEAD - get metadata
    */
-  private handleHead(path: string, res: ServerResponse): void {
-    const stream = this.store.get(path)
+  private async handleHead(path: string, res: ServerResponse): Promise<void> {
+    const stream = await this.store.get(path)
     if (!stream) {
       res.writeHead(404, { "content-type": `text/plain` })
       res.end()
@@ -845,7 +859,7 @@ export class DurableStreamTestServer {
     req: IncomingMessage,
     res: ServerResponse
   ): Promise<void> {
-    const stream = this.store.get(path)
+    const stream = await this.store.get(path)
     if (!stream) {
       res.writeHead(404, { "content-type": `text/plain` })
       res.end(`Stream not found`)
@@ -924,7 +938,7 @@ export class DurableStreamTestServer {
     // For long-poll mode, we fall through to wait for new data instead
     if (offset === `now` && live !== `long-poll`) {
       // Still a read: refresh the sliding TTL like any other GET
-      this.store.touchAccess(path)
+      await this.store.touchAccess(path)
 
       const headers: Record<string, string> = {
         [STREAM_OFFSET_HEADER]: stream.currentOffset,
@@ -955,8 +969,8 @@ export class DurableStreamTestServer {
     }
 
     // Read current messages
-    let { messages, upToDate } = this.store.read(path, effectiveOffset)
-    this.store.touchAccess(path)
+    let { messages, upToDate } = await this.store.read(path, effectiveOffset)
+    await this.store.touchAccess(path)
 
     // Only wait in long-poll if:
     // 1. long-poll mode is enabled
@@ -983,7 +997,7 @@ export class DurableStreamTestServer {
         effectiveOffset ?? stream.currentOffset,
         this.options.longPollTimeout
       )
-      this.store.touchAccess(path)
+      await this.store.touchAccess(path)
 
       // If stream was closed during wait, return immediately with Stream-Closed
       if (result.streamClosed) {
@@ -1009,7 +1023,7 @@ export class DurableStreamTestServer {
           this.options.cursorOptions
         )
         // Check if stream was closed during the wait
-        const currentStream = this.store.get(path)
+        const currentStream = await this.store.get(path)
         const timeoutHeaders: Record<string, string> = {
           [STREAM_OFFSET_HEADER]: effectiveOffset ?? stream.currentOffset,
           [STREAM_UP_TO_DATE_HEADER]: `true`,
@@ -1054,7 +1068,7 @@ export class DurableStreamTestServer {
 
     // Include Stream-Closed when stream is closed AND client is at tail AND upToDate
     // Re-fetch stream to get current state (may have been closed during request)
-    const currentStream = this.store.get(path)
+    const currentStream = await this.store.get(path)
     const clientAtTail = responseOffset === currentStream?.currentOffset
     if (currentStream?.closed && clientAtTail && upToDate) {
       headers[STREAM_CLOSED_HEADER] = `true`
@@ -1077,7 +1091,7 @@ export class DurableStreamTestServer {
     }
 
     // Format response (wraps JSON in array brackets)
-    const responseData = this.store.formatResponse(path, messages)
+    const responseData = await this.store.formatResponse(path, messages)
 
     // Apply compression if enabled and response is large enough
     let finalData: Uint8Array = responseData
@@ -1160,8 +1174,16 @@ export class DurableStreamTestServer {
     // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition
     while (isConnected && !this.isShuttingDown) {
       // Read current messages from offset
-      const { messages, upToDate } = this.store.read(path, currentOffset)
-      this.store.touchAccess(path)
+      const { messages, upToDate } = await this.store.read(path, currentOffset)
+      await this.store.touchAccess(path)
+
+      // Re-fetch stream to get current state (may have been closed). This is
+      // fetched BEFORE writing the data event so the data and control events
+      // are written contiguously. An await between them would let a client
+      // that reads up to the first "event: control" boundary (which can appear
+      // literally inside a payload) observe the data event without its
+      // trailing control event.
+      const currentStream = await this.store.get(path)
 
       // Send the whole batch as ONE data event: a control event follows
       // every data event (Protocol Section 5.8), and per-message data
@@ -1178,7 +1200,7 @@ export class DurableStreamTestServer {
           ).toString(`base64`)
         } else if (isJsonStream) {
           // Use formatResponse to get properly formatted JSON (strips trailing commas)
-          const jsonBytes = this.store.formatResponse(path, messages)
+          const jsonBytes = await this.store.formatResponse(path, messages)
           dataPayload = decoder.decode(jsonBytes)
         } else {
           dataPayload = decoder.decode(
@@ -1195,8 +1217,6 @@ export class DurableStreamTestServer {
       }
 
       // Compute offset the same way as HTTP GET: last message's offset, or stream's current offset
-      // Re-fetch stream to get current state (may have been closed)
-      const currentStream = this.store.get(path)
       const controlOffset =
         messages[messages.length - 1]?.offset ?? currentStream!.currentOffset
 
@@ -1258,7 +1278,7 @@ export class DurableStreamTestServer {
           currentOffset,
           this.options.longPollTimeout
         )
-        this.store.touchAccess(path)
+        await this.store.touchAccess(path)
 
         // Check if we should exit after wait returns (values can change during await)
         // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition
@@ -1286,7 +1306,7 @@ export class DurableStreamTestServer {
           )
 
           // Check if stream was closed during the wait
-          const streamAfterWait = this.store.get(path)
+          const streamAfterWait = await this.store.get(path)
           if (streamAfterWait?.closed) {
             const closedControlData: Record<string, string | boolean> = {
               [SSE_OFFSET_FIELD]: currentOffset,
@@ -1461,7 +1481,7 @@ export class DurableStreamTestServer {
 
         // Stream already closed by a different producer - conflict
         if (closeResult.producerResult?.status === `stream_closed`) {
-          const stream = this.store.get(path)
+          const stream = await this.store.get(path)
           res.writeHead(409, {
             "content-type": `text/plain`,
             [STREAM_CLOSED_HEADER]: `true`,
@@ -1472,7 +1492,7 @@ export class DurableStreamTestServer {
         }
 
         // A close is a write: refresh the sliding TTL like any other POST.
-        this.store.touchAccess(path)
+        await this.store.touchAccess(path)
 
         res.writeHead(204, {
           [STREAM_OFFSET_HEADER]: closeResult.finalOffset,
@@ -1485,7 +1505,7 @@ export class DurableStreamTestServer {
       }
 
       // Close-only without producer headers (simple idempotent close)
-      const closeResult = this.store.closeStream(path)
+      const closeResult = await this.store.closeStream(path)
       if (!closeResult) {
         res.writeHead(404, { "content-type": `text/plain` })
         res.end(`Stream not found`)
@@ -1493,7 +1513,7 @@ export class DurableStreamTestServer {
       }
 
       // A close is a write: refresh the sliding TTL like any other POST.
-      this.store.touchAccess(path)
+      await this.store.touchAccess(path)
 
       res.writeHead(204, {
         [STREAM_OFFSET_HEADER]: closeResult.finalOffset,
@@ -1532,11 +1552,9 @@ export class DurableStreamTestServer {
     if (producerId !== undefined) {
       result = await this.store.appendWithProducer(path, body, appendOptions)
     } else {
-      result = await Promise.resolve(
-        this.store.append(path, body, appendOptions)
-      )
+      result = await this.store.append(path, body, appendOptions)
     }
-    this.store.touchAccess(path)
+    await this.store.touchAccess(path)
 
     // Handle AppendResult with producer validation or streamClosed
     if (result && typeof result === `object` && `message` in result) {
@@ -1556,7 +1574,7 @@ export class DurableStreamTestServer {
       if (streamClosed && !message) {
         // Check if this is an idempotent producer duplicate (matching closing tuple)
         if (producerResult?.status === `duplicate`) {
-          const stream = this.store.get(path)
+          const stream = await this.store.get(path)
           res.writeHead(204, {
             [STREAM_OFFSET_HEADER]: stream?.currentOffset ?? ``,
             [STREAM_CLOSED_HEADER]: `true`,
@@ -1568,7 +1586,7 @@ export class DurableStreamTestServer {
         }
 
         // Not a duplicate - stream was closed by different request, return 409
-        const closedStream = this.store.get(path)
+        const closedStream = await this.store.get(path)
         res.writeHead(409, {
           "content-type": `text/plain`,
           [STREAM_CLOSED_HEADER]: `true`,
@@ -1680,14 +1698,14 @@ export class DurableStreamTestServer {
    */
   private async handleDelete(path: string, res: ServerResponse): Promise<void> {
     // Check for soft-deleted streams before attempting delete
-    const existing = this.store.get(path)
+    const existing = await this.store.get(path)
     if (existing?.softDeleted) {
       res.writeHead(410, { "content-type": `text/plain` })
       res.end(`Stream is gone`)
       return
     }
 
-    const deleted = this.store.delete(path)
+    const deleted = await this.store.delete(path)
     if (!deleted) {
       res.writeHead(404, { "content-type": `text/plain` })
       res.end(`Stream not found`)
