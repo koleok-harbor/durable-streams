@@ -210,10 +210,24 @@ The 232 tests cover:
 
 Two official implementations are available as reference:
 
-- **Node.js Dev Server** ([packages/server](https://github.com/durable-streams/durable-streams/tree/main/packages/server)) -- a TypeScript implementation good for understanding the basics. Uses in-memory or file-backed storage.
+- **Node.js Dev Server** ([packages/server](https://github.com/durable-streams/durable-streams/tree/main/packages/server)) -- a TypeScript implementation good for understanding the basics. Uses in-memory, file-backed, or Postgres storage.
 - **Caddy Plugin** ([packages/caddy-plugin](https://github.com/durable-streams/durable-streams/tree/main/packages/caddy-plugin)) -- a production-grade Go implementation built as a Caddy v2 plugin. Uses LMDB for persistence.
 
 See [Deployment](deployment.md) for usage details on the official server options.
+
+### Storage backends
+
+The Node.js dev server ships three storage backends, selected by constructor option:
+
+- **In-memory** (default) -- `new DurableStreamTestServer()`. Data is lost on restart.
+- **File-backed** -- pass `dataDir`. Uses LMDB for metadata and append-only log files for data.
+- **Postgres** -- pass `postgresUrl` (e.g. `postgres://user:pass@host:5432/db`). Uses a `durable_streams` table for metadata and a `durable_stream_messages` table for payloads. `postgresUrl` takes precedence over `dataDir`.
+
+```typescript
+const server = new DurableStreamTestServer({
+  postgresUrl: `postgres://user:pass@localhost:5432/db`,
+})
+```
 
 ---
 
