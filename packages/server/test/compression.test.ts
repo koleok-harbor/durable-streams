@@ -78,8 +78,8 @@ describe(`Response Compression`, () => {
     await server.stop()
   })
 
-  beforeEach(() => {
-    server.clear()
+  beforeEach(async () => {
+    await server.clear()
   })
 
   // Create a stream with enough data to trigger compression (> 1KB threshold)
