@@ -32,9 +32,11 @@ interface StreamLike {
 }
 
 interface SubscriptionStreamStore {
-  has: (path: string) => boolean
-  get: (path: string) => StreamLike | undefined
-  list: () => Array<string>
+  has: (path: string) => boolean | Promise<boolean>
+  get: (
+    path: string
+  ) => StreamLike | undefined | Promise<StreamLike | undefined>
+  list: () => Array<string> | Promise<Array<string>>
   append: (path: string, data: Uint8Array) => unknown
 }
 
@@ -158,12 +160,13 @@ export class SubscriptionManager {
     this.webhooksEnabled = opts.webhooksEnabled ?? true
   }
 
-  createOrConfirm(
+  async createOrConfirm(
     id: string,
     input: SubscriptionCreateInput
-  ):
+  ): Promise<
     | { subscription: SubscriptionRecord; created: boolean }
-    | { error: SubscriptionError } {
+    | { error: SubscriptionError }
+  > {
     const configHash = stableConfigHash(input)
     const existing = this.subscriptions.get(id)
     if (existing) {
@@ -240,18 +243,18 @@ export class SubscriptionManager {
         subscription,
         stream,
         `explicit`,
-        this.getTailOffset(stream)
+        await this.getTailOffset(stream)
       )
     }
 
     if (input.pattern) {
-      for (const stream of this.listStreams()) {
+      for (const stream of await this.listStreams()) {
         if (globMatch(input.pattern, stream)) {
           this.linkStream(
             subscription,
             stream,
             `glob`,
-            this.getTailOffset(stream)
+            await this.getTailOffset(stream)
           )
         }
       }
@@ -274,7 +277,10 @@ export class SubscriptionManager {
     return true
   }
 
-  addExplicitStreams(id: string, streams: Array<string>): boolean {
+  async addExplicitStreams(
+    id: string,
+    streams: Array<string>
+  ): Promise<boolean> {
     const subscription = this.get(id)
     if (!subscription) return false
     for (const stream of streams) {
@@ -282,7 +288,7 @@ export class SubscriptionManager {
         subscription,
         stream,
         `explicit`,
-        this.getTailOffset(stream)
+        await this.getTailOffset(stream)
       )
     }
     return true
@@ -344,7 +350,7 @@ export class SubscriptionManager {
     const fenced = this.validateWakeToken(subscription, token, request)
     if (fenced) return fenced
 
-    const ackError = this.applyAcks(subscription, request)
+    const ackError = await this.applyAcks(subscription, request)
     if (ackError) return ackError
 
     this.extendLease(subscription)
@@ -392,7 +398,7 @@ export class SubscriptionManager {
         },
       }
     }
-    if (!this.hasPendingWork(subscription)) {
+    if (!(await this.hasPendingWork(subscription))) {
       return this.errorResponse(
         409,
         `NO_PENDING_WORK`,
@@ -400,7 +406,10 @@ export class SubscriptionManager {
       )
     }
     if (!subscription.wake_id) {
-      await this.createWake(subscription, this.firstPendingStream(subscription))
+      await this.createWake(
+        subscription,
+        await this.firstPendingStream(subscription)
+      )
     }
 
     subscription.holder = worker
@@ -416,7 +425,7 @@ export class SubscriptionManager {
         wake_id: subscription.wake_id,
         generation: subscription.generation,
         token: subscription.token,
-        streams: this.streamInfos(subscription),
+        streams: await this.streamInfos(subscription),
         lease_ttl_ms: subscription.lease_ttl_ms,
       },
     }
@@ -445,7 +454,7 @@ export class SubscriptionManager {
     const fenced = this.validateWakeToken(subscription, token, request)
     if (fenced) return fenced
 
-    const ackError = this.applyAcks(subscription, request)
+    const ackError = await this.applyAcks(subscription, request)
     if (ackError) return ackError
 
     this.extendLease(subscription)
@@ -493,13 +502,15 @@ export class SubscriptionManager {
     return { status: 204 }
   }
 
-  serialize(subscription: SubscriptionRecord): Record<string, unknown> {
+  async serialize(
+    subscription: SubscriptionRecord
+  ): Promise<Record<string, unknown>> {
     return {
       id: subscription.id,
       subscription_id: subscription.id,
       type: subscription.type,
       pattern: subscription.pattern,
-      streams: this.streamInfos(subscription).map((stream) => ({
+      streams: (await this.streamInfos(subscription)).map((stream) => ({
         path: stream.path,
         link_type: stream.link_type,
         acked_offset: stream.acked_offset,
@@ -536,7 +547,7 @@ export class SubscriptionManager {
     triggeredBy: string
   ): Promise<void> {
     if (subscription.wake_id || subscription.holder) return
-    if (!this.hasPendingWork(subscription)) return
+    if (!(await this.hasPendingWork(subscription))) return
     await this.createWake(subscription, triggeredBy)
   }
 
@@ -547,7 +558,7 @@ export class SubscriptionManager {
     subscription.generation++
     subscription.wake_id = generateWakeId()
     subscription.wake_snapshot = new Map(
-      this.streamInfos(subscription).map((stream) => [
+      (await this.streamInfos(subscription)).map((stream) => [
         stream.path,
         stream.tail_offset,
       ])
@@ -577,7 +588,7 @@ export class SubscriptionManager {
       subscription_id: subscription.id,
       wake_id: subscription.wake_id,
       generation: subscription.generation,
-      streams: this.streamInfos(subscription),
+      streams: await this.streamInfos(subscription),
       callback_url: this.subscriptionActionUrl(subscription, `callback`),
       callback_token: subscription.token,
     })
@@ -651,7 +662,7 @@ export class SubscriptionManager {
   ): Promise<void> {
     if (!subscription.wake_stream) return
     const wakeStream = toAbsoluteStreamPath(subscription.wake_stream)
-    if (!this.streamStore.has(wakeStream)) {
+    if (!(await this.streamStore.has(wakeStream))) {
       serverLog.warn(
         `[subscriptions] wake stream does not exist: ${wakeStream}`
       )
@@ -679,10 +690,10 @@ export class SubscriptionManager {
     }
   }
 
-  private applyAcks(
+  private async applyAcks(
     subscription: SubscriptionRecord,
     request: SubscriptionCallbackRequest
-  ): { status: number; body: Record<string, unknown> } | null {
+  ): Promise<{ status: number; body: Record<string, unknown> } | null> {
     if (!request.acks) return null
     for (const ack of request.acks) {
       const stream = normalizeRelativePath(ack.stream ?? ack.path ?? ``)
@@ -708,7 +719,7 @@ export class SubscriptionManager {
           `Ack offset regresses the committed cursor`
         )
       }
-      if (compareOffsets(ack.offset, this.getTailOffset(stream)) > 0) {
+      if (compareOffsets(ack.offset, await this.getTailOffset(stream)) > 0) {
         return this.errorResponse(
           409,
           `INVALID_OFFSET`,
@@ -752,35 +763,43 @@ export class SubscriptionManager {
   private async triggerNextWakeIfPending(
     subscription: SubscriptionRecord
   ): Promise<boolean> {
-    if (!this.hasPendingWork(subscription)) return false
-    await this.createWake(subscription, this.firstPendingStream(subscription))
+    if (!(await this.hasPendingWork(subscription))) return false
+    await this.createWake(
+      subscription,
+      await this.firstPendingStream(subscription)
+    )
     return true
   }
 
-  private hasPendingWork(subscription: SubscriptionRecord): boolean {
-    return this.streamInfos(subscription).some((stream) => stream.has_pending)
-  }
-
-  private firstPendingStream(subscription: SubscriptionRecord): string {
-    return (
-      this.streamInfos(subscription).find((stream) => stream.has_pending)
-        ?.path ?? ``
-    )
-  }
-
-  private streamInfos(
+  private async hasPendingWork(
     subscription: SubscriptionRecord
-  ): Array<SubscriptionStreamInfo> {
-    return Array.from(subscription.streams.values()).map((link) => {
-      const tail = this.getTailOffset(link.path)
-      return {
+  ): Promise<boolean> {
+    const infos = await this.streamInfos(subscription)
+    return infos.some((stream) => stream.has_pending)
+  }
+
+  private async firstPendingStream(
+    subscription: SubscriptionRecord
+  ): Promise<string> {
+    const infos = await this.streamInfos(subscription)
+    return infos.find((stream) => stream.has_pending)?.path ?? ``
+  }
+
+  private async streamInfos(
+    subscription: SubscriptionRecord
+  ): Promise<Array<SubscriptionStreamInfo>> {
+    const links: Array<SubscriptionStreamInfo> = []
+    for (const link of subscription.streams.values()) {
+      const tail = await this.getTailOffset(link.path)
+      links.push({
         path: link.path,
         link_type: link.link_types.has(`explicit`) ? `explicit` : `glob`,
         acked_offset: link.acked_offset,
         tail_offset: tail,
         has_pending: compareOffsets(tail, link.acked_offset) > 0,
-      }
-    })
+      })
+    }
+    return links
   }
 
   private linkStream(
@@ -804,18 +823,16 @@ export class SubscriptionManager {
     return link
   }
 
-  private listStreams(): Array<string> {
-    return this.streamStore
-      .list()
+  private async listStreams(): Promise<Array<string>> {
+    const paths = await this.streamStore.list()
+    return paths
       .map((path) => toStreamRelativePath(path))
       .filter((path): path is string => path !== null)
   }
 
-  private getTailOffset(streamPath: string): string {
-    return (
-      this.streamStore.get(toAbsoluteStreamPath(streamPath))?.currentOffset ??
-      ZERO_OFFSET
-    )
+  private async getTailOffset(streamPath: string): Promise<string> {
+    const stream = await this.streamStore.get(toAbsoluteStreamPath(streamPath))
+    return stream?.currentOffset ?? ZERO_OFFSET
   }
 
   private subscriptionActionUrl(
