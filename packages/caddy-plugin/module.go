@@ -37,6 +37,16 @@ type Handler struct {
 	// If set, enables the webhook subscription system.
 	WebhookCallbackURL string `json:"webhook_callback_url,omitempty"`
 
+	// PostgresURL is a Postgres connection string. If set, uses the
+	// Postgres-backed store instead of the file store.
+	PostgresURL string `json:"postgres_url,omitempty"`
+
+	// PostgresMaxConns is the maximum number of Postgres pool connections.
+	PostgresMaxConns int `json:"postgres_max_conns,omitempty"`
+
+	// PostgresSchema is the schema to create the durable-streams tables in.
+	PostgresSchema string `json:"postgres_schema,omitempty"`
+
 	store          store.Store
 	logger         *zap.Logger
 	webhookManager *webhook.Manager
@@ -67,7 +77,18 @@ func (h *Handler) Provision(ctx caddy.Context) error {
 	}
 
 	// Initialize store
-	if h.DataDir == "" {
+	if h.PostgresURL != "" {
+		pgStore, err := store.NewPostgresStore(store.PostgresStoreConfig{
+			ConnectionString: h.PostgresURL,
+			Max:              h.PostgresMaxConns,
+			Schema:           h.PostgresSchema,
+		})
+		if err != nil {
+			return fmt.Errorf("failed to initialize postgres store: %w", err)
+		}
+		h.store = pgStore
+		h.logger.Info("using postgres-backed store")
+	} else if h.DataDir == "" {
 		// Use in-memory store for testing
 		h.store = store.NewMemoryStore()
 		h.logger.Info("using in-memory store (no data_dir configured)")
@@ -135,6 +156,9 @@ func (h *Handler) Cleanup() error {
 //	    max_file_handles 100
 //	    long_poll_timeout 30s
 //	    sse_reconnect_interval 60s
+//	    postgres_url postgres://user:pass@host:5432/db
+//	    postgres_max_conns 10
+//	    postgres_schema public
 //	}
 func (h *Handler) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 	for d.Next() {
@@ -176,6 +200,24 @@ func (h *Handler) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 				h.SSEReconnectInterval = caddy.Duration(dur)
 			case "webhook_callback_url":
 				if !d.Args(&h.WebhookCallbackURL) {
+					return d.ArgErr()
+				}
+			case "postgres_url":
+				if !d.Args(&h.PostgresURL) {
+					return d.ArgErr()
+				}
+			case "postgres_max_conns":
+				var val string
+				if !d.Args(&val) {
+					return d.ArgErr()
+				}
+				var err error
+				h.PostgresMaxConns, err = parseIntArg(val)
+				if err != nil {
+					return d.Errf("invalid postgres_max_conns: %v", err)
+				}
+			case "postgres_schema":
+				if !d.Args(&h.PostgresSchema) {
 					return d.ArgErr()
 				}
 			default:
