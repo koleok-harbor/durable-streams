@@ -124,7 +124,7 @@ export class SubscriptionRoutes {
         return
       }
 
-      const result = this.manager.createOrConfirm(
+      const result = await this.manager.createOrConfirm(
         route.subscriptionId,
         input.value
       )
@@ -141,7 +141,7 @@ export class SubscriptionRoutes {
       this.writeJson(
         res,
         result.created ? 201 : 200,
-        this.manager.serialize(result.subscription)
+        await this.manager.serialize(result.subscription)
       )
       return
     }
@@ -157,7 +157,7 @@ export class SubscriptionRoutes {
         )
         return
       }
-      this.writeJson(res, 200, this.manager.serialize(subscription))
+      this.writeJson(res, 200, await this.manager.serialize(subscription))
       return
     }
 
@@ -209,7 +209,7 @@ export class SubscriptionRoutes {
       )
       return
     }
-    const ok = this.manager.addExplicitStreams(
+    const ok = await this.manager.addExplicitStreams(
       route.subscriptionId,
       streams.map(normalizeRelativePath)
     )

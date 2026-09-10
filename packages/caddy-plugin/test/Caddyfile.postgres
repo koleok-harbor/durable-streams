@@ -1,0 +1,13 @@
+{
+	admin off
+}
+
+:4437 {
+	route /* {
+		durable_streams {
+			postgres_url {$POSTGRES_URL}
+			long_poll_timeout 500ms
+			webhook_callback_url http://localhost:4437
+		}
+	}
+}

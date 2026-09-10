@@ -1,12 +1,16 @@
 /**
  * In-memory test server for durable-stream e2e testing.
  *
+ * Can be run standalone via `durable-streams-server` CLI or embedded in other apps.
+ *
  * @packageDocumentation
  */
 
 export { DurableStreamTestServer } from "./server"
 export { StreamStore } from "./store"
 export { FileBackedStreamStore } from "./file-store"
+export { PostgresStreamStore } from "./postgres-store"
+export type { PostgresStreamStoreOptions } from "./postgres-store"
 export { encodeStreamPath, decodeStreamPath } from "./path-encoding"
 export { createRegistryHooks } from "./registry-hook"
 export {

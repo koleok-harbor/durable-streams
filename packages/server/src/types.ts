@@ -187,6 +187,12 @@ export interface TestServerOptions {
   dataDir?: string
 
   /**
+   * Postgres connection string.
+   * If provided, enables Postgres-backed storage (takes precedence over dataDir).
+   */
+  postgresUrl?: string
+
+  /**
    * Hook called when a stream is created.
    */
   onStreamCreated?: StreamLifecycleHook
