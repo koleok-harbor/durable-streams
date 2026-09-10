@@ -1,6 +1,8 @@
 /**
  * In-memory test server for durable-stream e2e testing.
  *
+ * Can be run standalone via `durable-streams-server` CLI or embedded in other apps.
+ *
  * @packageDocumentation
  */
 
