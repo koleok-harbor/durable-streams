@@ -35,10 +35,14 @@
     },
     "./package.json": "./package.json"
   },
+  "bin": {
+    "durable-streams-server": "./dist/start.js"
+  },
   "sideEffects": false,
   "scripts": {
     "build": "tsdown",
     "dev": "tsdown --watch",
+    "start": "node dist/start.js",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
